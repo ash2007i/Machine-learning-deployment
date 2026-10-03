@@ -1,20 +1,33 @@
-```python
 from flask import Flask, request, jsonify
 import joblib
-import threading
-import time
+import os
 
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
-MODEL_PATH = "/content/math_difficulty_model.joblib"
-PACKAGED_MODEL_PATH = "/content/scalar_math_difficulty_model.joblib"
-TRAINING_LOG_PATH = "/content/training_logs.txt"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+MODEL_PATH = os.path.join(
+    BASE_DIR,
+    "math_difficulty_model.joblib"
+)
+
+PACKAGED_MODEL_PATH = os.path.join(
+    BASE_DIR,
+    "scalar_math_difficulty_model.joblib"
+)
+
+TRAINING_LOG_PATH = os.path.join(
+    BASE_DIR,
+    "training_logs.txt"
+)
 
 HOST = "0.0.0.0"
-PORT = 5004
+
+# Render provides the PORT environment variable
+PORT = int(os.environ.get("PORT", 5004))
 
 
 # ============================================================
@@ -29,11 +42,15 @@ app = Flask(__name__)
 # ============================================================
 
 try:
+
     base_pipeline = joblib.load(MODEL_PATH)
+
     print("Original math difficulty model loaded successfully.")
 
 except Exception as e:
+
     print(f"ERROR: Could not load model: {e}")
+
     base_pipeline = None
 
 
@@ -51,6 +68,7 @@ if base_pipeline is not None:
     }
 
     try:
+
         joblib.dump(
             scalar_model_package,
             PACKAGED_MODEL_PATH
@@ -62,7 +80,10 @@ if base_pipeline is not None:
         )
 
     except Exception as e:
-        print(f"ERROR: Could not save packaged model: {e}")
+
+        print(
+            f"ERROR: Could not save packaged model: {e}"
+        )
 
 
 # ============================================================
@@ -74,32 +95,33 @@ def predict():
 
     try:
 
-        # Get JSON request
         data = request.get_json(force=True)
 
-        # Get query
         query = data.get("query", "")
 
-        # Validate query
         if not query or not isinstance(query, str):
 
             return jsonify({
                 "error": 'Please provide a valid math "query".'
             }), 400
 
+        # Make sure model exists
+        if base_pipeline is None:
+
+            return jsonify({
+                "error": "Model is not loaded on the server."
+            }), 500
+
         # Load packaged model
         pkg = joblib.load(PACKAGED_MODEL_PATH)
 
-        # Extract model
         model = pkg["model"]
 
-        # Make prediction
+        # Predict
         prediction = model.predict([query])[0]
 
-        # Convert prediction safely to string
         prediction_text = str(prediction).upper()
 
-        # Return response
         return jsonify({
 
             "query": query,
@@ -129,37 +151,31 @@ def predict():
 def train_append():
 
     """
-    Register a new query-difficulty mapping.
+    Records new query/difficulty pairs.
 
     IMPORTANT:
-    This endpoint does NOT actually retrain the ML model.
-
-    It only stores new training examples so that the model
-    can be retrained later.
+    This does NOT retrain the ML model.
     """
 
     try:
 
-        # Get JSON request
         data = request.get_json(force=True)
 
-        # Extract values
         query = data.get("query", "")
+
         difficulty = data.get("difficulty", "")
 
-        # Validate input
         if not query or not difficulty:
 
             return jsonify({
 
                 "error": (
                     'Please provide both "query" and '
-                    '"difficulty" to register training.'
+                    '"difficulty".'
                 )
 
             }), 400
 
-        # Append training data to log
         with open(
             TRAINING_LOG_PATH,
             "a",
@@ -170,7 +186,6 @@ def train_append():
                 f"{query}|||{difficulty}\n"
             )
 
-        # Return success
         return jsonify({
 
             "status": "success",
@@ -192,7 +207,7 @@ def train_append():
 
 
 # ============================================================
-# HEALTH CHECK API
+# HEALTH CHECK
 # ============================================================
 
 @app.route("/api/health", methods=["GET"])
@@ -204,51 +219,53 @@ def health():
 
         "service": "Scalar Math Difficulty Model API",
 
-        "port": PORT,
-
         "model_loaded": base_pipeline is not None
 
     }), 200
 
 
 # ============================================================
-# FLASK SERVER FUNCTION
+# ROOT ENDPOINT
 # ============================================================
 
-def run_api():
+@app.route("/", methods=["GET"])
+def home():
 
-    app.run(
+    return jsonify({
 
-        host=HOST,
+        "service": "Scalar Math Difficulty Model API",
 
-        port=PORT,
+        "status": "online",
 
-        debug=False,
+        "endpoints": {
 
-        use_reloader=False
+            "health": "GET /api/health",
 
-    )
+            "predict": "POST /api/predict",
+
+            "train": "POST /api/train"
+
+        }
+
+    })
 
 
 # ============================================================
-# MAIN
+# START SERVER
 # ============================================================
 
 if __name__ == "__main__":
 
-    print("")
     print("==============================================")
     print("   SCALAR MATH DIFFICULTY MODEL API")
     print("==============================================")
-    print(f"Server: http://127.0.0.1:{PORT}")
-    print("")
-    print("Available endpoints:")
-    print(f"  POST http://127.0.0.1:{PORT}/api/predict")
-    print(f"  POST http://127.0.0.1:{PORT}/api/train")
-    print(f"  GET  http://127.0.0.1:{PORT}/api/health")
-    print("==============================================")
-    print("")
 
-    # Start Flask
-    run_api()
-```
+    print(f"Starting server on port {PORT}")
+
+    print("==============================================")
+
+    app.run(
+        host=HOST,
+        port=PORT,
+        debug=False
+    )
