@@ -2,12 +2,10 @@ from flask import Flask, request, jsonify
 import joblib
 import os
 import re
-import ast
-import operator
-
+import sympy as sp
 
 # ============================================================
-# CONFIGURATION
+# CONFIG
 # ============================================================
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -30,28 +28,18 @@ TRAINING_LOG_PATH = os.path.join(
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", 5004))
 
-
-# ============================================================
-# CREATE FLASK APP
-# ============================================================
-
 app = Flask(__name__)
 
 
 # ============================================================
-# LOAD MODEL
+# LOAD DIFFICULTY MODEL
 # ============================================================
 
 try:
-
     base_pipeline = joblib.load(MODEL_PATH)
-
     print("Original math difficulty model loaded successfully.")
-
 except Exception as e:
-
     print(f"ERROR: Could not load model: {e}")
-
     base_pipeline = None
 
 
@@ -69,416 +57,562 @@ if base_pipeline is not None:
     }
 
     try:
-
         joblib.dump(
             scalar_model_package,
             PACKAGED_MODEL_PATH
         )
 
         print(
-            f"Packaged model saved successfully at: "
+            "Packaged model saved successfully at: "
             f"{PACKAGED_MODEL_PATH}"
         )
 
     except Exception as e:
-
         print(f"ERROR: Could not save packaged model: {e}")
 
 
 # ============================================================
-# SAFE MATH SOLVER
+# DIFFICULTY PREDICTION
 # ============================================================
 
-OPERATORS = {
-    ast.Add: operator.add,
-    ast.Sub: operator.sub,
-    ast.Mult: operator.mul,
-    ast.Div: operator.truediv,
-    ast.Pow: operator.pow,
-    ast.Mod: operator.mod
-}
+def predict_difficulty(query):
 
+    if base_pipeline is None:
+        return {
+            "difficulty": None,
+            "confidence": None,
+            "probabilities": {}
+        }
 
-def safe_calculate(expression):
+    prediction = base_pipeline.predict([query])[0]
 
-    """
-    Safely evaluates basic mathematical expressions.
+    probabilities = {}
 
-    Supports:
-        +  -  *  /  %  **
-        parentheses
-        positive/negative numbers
-    """
-
-    expression = expression.strip()
-
-    # Convert common math symbols
-    expression = expression.replace("×", "*")
-    expression = expression.replace("÷", "/")
-    expression = expression.replace("^", "**")
-
-    # Remove common question wording
-    expression = re.sub(
-        r"(?i)(what is|calculate|solve|find|evaluate)\s+",
-        "",
-        expression
-    )
-
-    expression = expression.rstrip("?").strip()
+    confidence = None
 
     try:
 
-        tree = ast.parse(
-            expression,
-            mode="eval"
-        )
+        if hasattr(base_pipeline, "predict_proba"):
 
-        def evaluate(node):
+            probs = base_pipeline.predict_proba([query])[0]
 
-            if isinstance(node, ast.Expression):
+            classes = base_pipeline.classes_
 
-                return evaluate(node.body)
-
-            if isinstance(node, ast.Constant):
-
-                if isinstance(node.value, (int, float)):
-
-                    return node.value
-
-                raise ValueError("Invalid constant")
-
-            if isinstance(node, ast.UnaryOp):
-
-                value = evaluate(node.operand)
-
-                if isinstance(node.op, ast.USub):
-                    return -value
-
-                if isinstance(node.op, ast.UAdd):
-                    return value
-
-                raise ValueError("Invalid unary operator")
-
-            if isinstance(node, ast.BinOp):
-
-                left = evaluate(node.left)
-                right = evaluate(node.right)
-
-                operation = OPERATORS.get(
-                    type(node.op)
+            for cls, prob in zip(classes, probs):
+                probabilities[str(cls)] = round(
+                    float(prob),
+                    4
                 )
 
-                if operation is None:
-                    raise ValueError("Operator not supported")
-
-                return operation(left, right)
-
-            raise ValueError(
-                "Expression contains unsupported elements"
+            confidence = round(
+                float(max(probs)),
+                4
             )
 
-        result = evaluate(tree)
+    except Exception as e:
 
-        return result
+        print(
+            f"Probability calculation failed: {e}"
+        )
 
-    except Exception:
+    return {
+        "difficulty": str(prediction).upper(),
+        "confidence": confidence,
+        "probabilities": probabilities
+    }
+
+
+# ============================================================
+# CLEAN MATHEMATICAL INPUT
+# ============================================================
+
+def clean_expression(text):
+
+    expression = text.strip()
+
+    # Unicode replacements
+    expression = expression.replace("²", "^2")
+    expression = expression.replace("³", "^3")
+    expression = expression.replace("⁴", "^4")
+    expression = expression.replace("⁵", "^5")
+
+    expression = expression.replace("−", "-")
+    expression = expression.replace("×", "*")
+    expression = expression.replace("÷", "/")
+
+    # Convert ^ to **
+    expression = expression.replace("^", "**")
+
+    return expression
+
+
+# ============================================================
+# SOLVE EQUATIONS
+# ============================================================
+
+def solve_equation(query):
+
+    x = sp.symbols("x")
+
+    expression = clean_expression(query)
+
+    # Remove common natural-language prefixes
+    prefixes = [
+        "solve",
+        "solve for x",
+        "find x",
+        "calculate x"
+    ]
+
+    lower_expression = expression.lower()
+
+    for prefix in prefixes:
+
+        if lower_expression.startswith(prefix):
+
+            expression = expression[
+                len(prefix):
+            ].strip()
+
+            break
+
+    # Remove trailing punctuation
+    expression = expression.rstrip("?.!")
+
+    # Equation
+    if "=" in expression:
+
+        left, right = expression.split("=", 1)
+
+        left_expr = sp.sympify(left)
+        right_expr = sp.sympify(right)
+
+        equation = sp.Eq(
+            left_expr,
+            right_expr
+        )
+
+        solutions = sp.solve(
+            equation,
+            x
+        )
+
+    else:
+
+        expr = sp.sympify(expression)
+
+        solutions = sp.solve(
+            expr,
+            x
+        )
+
+    if not solutions:
 
         return None
 
+    steps = []
+
+    steps.append(
+        f"Original problem: {query}"
+    )
+
+    if "=" in expression:
+
+        steps.append(
+            f"Equation: {expression}"
+        )
+
+    steps.append(
+        f"Solutions: {', '.join(map(str, solutions))}"
+    )
+
+    answer = ", ".join(
+        f"x = {solution}"
+        for solution in solutions
+    )
+
+    return {
+        "answer": answer,
+        "steps": steps
+    }
+
 
 # ============================================================
-# PREDICTION API
+# DERIVATIVE
 # ============================================================
 
-@app.route("/api/predict", methods=["POST"])
+def solve_derivative(query):
+
+    x = sp.symbols("x")
+
+    expression = query
+
+    lower = expression.lower()
+
+    keywords = [
+        "derivative of",
+        "differentiate",
+        "differentiate"
+    ]
+
+    for keyword in keywords:
+
+        if keyword in lower:
+
+            index = lower.find(keyword)
+
+            expression = expression[
+                index + len(keyword):
+            ].strip()
+
+            break
+
+    expression = clean_expression(expression)
+
+    expression = expression.rstrip("?.!")
+
+    expr = sp.sympify(expression)
+
+    result = sp.diff(
+        expr,
+        x
+    )
+
+    steps = [
+        f"Function: {expr}",
+        "Differentiate with respect to x.",
+        f"Derivative: {result}"
+    ]
+
+    return {
+        "answer": str(result),
+        "steps": steps
+    }
+
+
+# ============================================================
+# INTEGRAL
+# ============================================================
+
+def solve_integral(query):
+
+    x = sp.symbols("x")
+
+    expression = query
+
+    lower = expression.lower()
+
+    # Definite integral:
+    # "integral of x^2 from 0 to 5"
+
+    pattern = r"integral of (.+?) from (.+?) to (.+)"
+
+    match = re.search(
+        pattern,
+        lower
+    )
+
+    if match:
+
+        function_text = match.group(1)
+        lower_bound = match.group(2)
+        upper_bound = match.group(3)
+
+        function_text = clean_expression(
+            function_text
+        )
+
+        function = sp.sympify(
+            function_text
+        )
+
+        a = sp.sympify(
+            clean_expression(lower_bound)
+        )
+
+        b = sp.sympify(
+            clean_expression(upper_bound)
+        )
+
+        result = sp.integrate(
+            function,
+            (x, a, b)
+        )
+
+        steps = [
+            f"Function: {function}",
+            f"Bounds: {a} to {b}",
+            f"Integral: {sp.integrate(function, x)}",
+            f"Final value: {result}"
+        ]
+
+        return {
+            "answer": str(result),
+            "steps": steps
+        }
+
+    # Indefinite integral
+
+    keywords = [
+        "integral of",
+        "integrate"
+    ]
+
+    for keyword in keywords:
+
+        if keyword in lower:
+
+            index = lower.find(keyword)
+
+            expression = expression[
+                index + len(keyword):
+            ].strip()
+
+            break
+
+    expression = clean_expression(
+        expression
+    )
+
+    expression = expression.rstrip("?.!")
+
+    expr = sp.sympify(
+        expression
+    )
+
+    result = sp.integrate(
+        expr,
+        x
+    )
+
+    steps = [
+        f"Function: {expr}",
+        f"Integral: {result} + C"
+    ]
+
+    return {
+        "answer": f"{result} + C",
+        "steps": steps
+    }
+
+
+# ============================================================
+# GENERAL MATH SOLVER
+# ============================================================
+
+def solve_math(query):
+
+    lower = query.lower().strip()
+
+    try:
+
+        # --------------------------------------------
+        # DERIVATIVE
+        # --------------------------------------------
+
+        if (
+            "derivative" in lower
+            or "differentiate" in lower
+        ):
+
+            result = solve_derivative(
+                query
+            )
+
+            return {
+                "status": "SOLVED",
+                **result
+            }
+
+
+        # --------------------------------------------
+        # INTEGRAL
+        # --------------------------------------------
+
+        if (
+            "integral" in lower
+            or "integrate" in lower
+        ):
+
+            result = solve_integral(
+                query
+            )
+
+            return {
+                "status": "SOLVED",
+                **result
+            }
+
+
+        # --------------------------------------------
+        # EQUATION
+        # --------------------------------------------
+
+        if (
+            "=" in query
+            or lower.startswith("solve")
+            or "find x" in lower
+        ):
+
+            result = solve_equation(
+                query
+            )
+
+            if result is not None:
+
+                return {
+                    "status": "SOLVED",
+                    **result
+                }
+
+
+        # --------------------------------------------
+        # BASIC EXPRESSION
+        # --------------------------------------------
+
+        expression = clean_expression(
+            query
+        )
+
+        expression = expression.rstrip(
+            "?.!"
+        )
+
+        result = sp.sympify(
+            expression
+        )
+
+        result = sp.simplify(
+            result
+        )
+
+        return {
+            "status": "SOLVED",
+            "answer": str(result),
+            "steps": [
+                f"Expression: {expression}",
+                f"Result: {result}"
+            ]
+        }
+
+
+    except Exception as e:
+
+        print(
+            f"Math solver error: {e}"
+        )
+
+        return {
+            "status": "UNABLE_TO_SOLVE",
+            "answer": None,
+            "steps": [],
+            "error": str(e)
+        }
+
+
+# ============================================================
+# PREDICT + SOLVE
+# ============================================================
+
+@app.route(
+    "/api/predict",
+    methods=["POST"]
+)
 def predict():
 
     try:
 
-        data = request.get_json(force=True)
-
-        query = data.get("query", "")
-
-        if not query or not isinstance(query, str):
-
-            return jsonify({
-                "error": 'Please provide a valid math "query".'
-            }), 400
-
-        if base_pipeline is None:
-
-            return jsonify({
-                "error": "Model is not loaded on the server."
-            }), 500
-
-        pkg = joblib.load(
-            PACKAGED_MODEL_PATH
+        data = request.get_json(
+            force=True
         )
 
-        model = pkg["model"]
+        query = data.get(
+            "query",
+            ""
+        )
 
-        prediction = model.predict([query])[0]
+        if not query or not isinstance(
+            query,
+            str
+        ):
 
-        prediction_text = str(
-            prediction
-        ).upper()
+            return jsonify({
+                "error":
+                'Please provide a valid math "query".'
+            }), 400
 
-        response = {
+
+        # Difficulty
+        difficulty = predict_difficulty(
+            query
+        )
+
+
+        # Actual mathematics
+        solution = solve_math(
+            query
+        )
+
+
+        return jsonify({
 
             "query": query,
 
             "predicted_difficulty":
-                prediction_text,
+                difficulty["difficulty"],
 
-            "model_version":
-                pkg["version"],
+            "prediction_confidence":
+                difficulty["confidence"],
 
-            "model_accuracy":
-                pkg["accuracy_scalar"]
-
-        }
-
-        # Add confidence if the model supports it
-        try:
-
-            probabilities = model.predict_proba(
-                [query]
-            )[0]
-
-            classes = model.classes_
-
-            confidence = max(probabilities)
-
-            response["prediction_confidence"] = float(
-                confidence
-            )
-
-            response["class_probabilities"] = {
-                str(classes[i]):
-                float(probabilities[i])
-                for i in range(len(classes))
-            }
-
-        except Exception:
-
-            response["prediction_confidence"] = None
-
-        return jsonify(response), 200
-
-    except Exception as e:
-
-        return jsonify({
-
-            "error":
-                f"Prediction failed: {str(e)}"
-
-        }), 500
-
-
-# ============================================================
-# SOLVE API
-# ============================================================
-
-@app.route("/api/solve", methods=["POST"])
-def solve():
-
-    try:
-
-        data = request.get_json(force=True)
-
-        query = data.get("query", "")
-
-        if not query or not isinstance(query, str):
-
-            return jsonify({
-
-                "error":
-                    'Please provide a valid math "query".'
-
-            }), 400
-
-        # ----------------------------------------------------
-        # 1. GET ML MODEL PREDICTION
-        # ----------------------------------------------------
-
-        if base_pipeline is None:
-
-            return jsonify({
-
-                "error":
-                    "Model is not loaded on the server."
-
-            }), 500
-
-        pkg = joblib.load(
-            PACKAGED_MODEL_PATH
-        )
-
-        model = pkg["model"]
-
-        prediction = model.predict([query])[0]
-
-        difficulty = str(
-            prediction
-        ).upper()
-
-        # ----------------------------------------------------
-        # 2. SOLVE THE MATHEMATICAL EXPRESSION
-        # ----------------------------------------------------
-
-        answer = safe_calculate(query)
-
-        # ----------------------------------------------------
-        # 3. BUILD RESPONSE
-        # ----------------------------------------------------
-
-        if answer is None:
-
-            solution_status = "UNABLE_TO_SOLVE"
-
-            answer_text = (
-                "I could not solve this expression "
-                "with the current mathematical solver."
-            )
-
-        else:
-
-            solution_status = "SOLVED"
-
-            if isinstance(answer, float) and answer.is_integer():
-
-                answer = int(answer)
-
-            answer_text = str(answer)
-
-        response = {
-
-            "query": query,
-
-            "answer": answer_text,
+            "class_probabilities":
+                difficulty["probabilities"],
 
             "solution_status":
-                solution_status,
+                solution["status"],
 
-            "predicted_difficulty":
-                difficulty,
+            "answer":
+                solution["answer"],
 
-            "model_accuracy":
-                pkg["accuracy_scalar"],
+            "steps":
+                solution["steps"],
 
             "model_version":
-                pkg["version"]
+                1.0,
 
-        }
+            "model_accuracy":
+                0.60
 
-        # ----------------------------------------------------
-        # 4. MODEL CONFIDENCE
-        # ----------------------------------------------------
+        }), 200
 
-        try:
-
-            probabilities = model.predict_proba(
-                [query]
-            )[0]
-
-            classes = model.classes_
-
-            confidence = max(probabilities)
-
-            response["prediction_confidence"] = float(
-                confidence
-            )
-
-            response["class_probabilities"] = {
-
-                str(classes[i]):
-                float(probabilities[i])
-
-                for i in range(len(classes))
-
-            }
-
-        except Exception:
-
-            response["prediction_confidence"] = None
-
-        # ----------------------------------------------------
-        # 5. ANSWER ACCURACY
-        # ----------------------------------------------------
-        #
-        # We cannot honestly calculate answer accuracy
-        # without a known correct answer.
-        #
-        # If the client sends:
-        #
-        # {
-        #     "query": "2 + 3",
-        #     "expected_answer": 5
-        # }
-        #
-        # we can compare the result.
-        # ----------------------------------------------------
-
-        expected_answer = data.get(
-            "expected_answer",
-            None
-        )
-
-        if expected_answer is not None and answer is not None:
-
-            try:
-
-                expected_numeric = float(
-                    expected_answer
-                )
-
-                answer_numeric = float(
-                    answer
-                )
-
-                if abs(
-                    expected_numeric -
-                    answer_numeric
-                ) < 1e-9:
-
-                    response["answer_accuracy"] = 1.0
-
-                else:
-
-                    response["answer_accuracy"] = 0.0
-
-            except Exception:
-
-                response["answer_accuracy"] = None
-
-        else:
-
-            response["answer_accuracy"] = None
-
-        return jsonify(response), 200
 
     except Exception as e:
 
         return jsonify({
-
             "error":
-                f"Solving failed: {str(e)}"
-
+            f"Prediction failed: {str(e)}"
         }), 500
 
 
 # ============================================================
-# TRAINING DATA API
+# TRAINING LOG
 # ============================================================
 
-@app.route("/api/train", methods=["POST"])
+@app.route(
+    "/api/train",
+    methods=["POST"]
+)
 def train_append():
 
     try:
 
-        data = request.get_json(force=True)
+        data = request.get_json(
+            force=True
+        )
 
-        query = data.get("query", "")
+        query = data.get(
+            "query",
+            ""
+        )
 
         difficulty = data.get(
             "difficulty",
@@ -488,12 +622,10 @@ def train_append():
         if not query or not difficulty:
 
             return jsonify({
-
                 "error":
-                    'Please provide both "query" and '
-                    '"difficulty".'
-
+                'Please provide both "query" and "difficulty".'
             }), 400
+
 
         with open(
             TRAINING_LOG_PATH,
@@ -505,32 +637,34 @@ def train_append():
                 f"{query}|||{difficulty}\n"
             )
 
+
         return jsonify({
 
             "status":
                 "success",
 
             "message":
-                "New pattern recorded. "
-                "Ready for retraining iteration."
+                "New pattern recorded. Ready for retraining iteration."
 
         }), 200
+
 
     except Exception as e:
 
         return jsonify({
-
             "error":
-                f"Registration failed: {str(e)}"
-
+            f"Registration failed: {str(e)}"
         }), 500
 
 
 # ============================================================
-# HEALTH CHECK
+# HEALTH
 # ============================================================
 
-@app.route("/api/health", methods=["GET"])
+@app.route(
+    "/api/health",
+    methods=["GET"]
+)
 def health():
 
     return jsonify({
@@ -548,10 +682,13 @@ def health():
 
 
 # ============================================================
-# ROOT ENDPOINT
+# HOME
 # ============================================================
 
-@app.route("/", methods=["GET"])
+@app.route(
+    "/",
+    methods=["GET"]
+)
 def home():
 
     return jsonify({
@@ -570,9 +707,6 @@ def home():
             "predict":
                 "POST /api/predict",
 
-            "solve":
-                "POST /api/solve",
-
             "train":
                 "POST /api/train"
 
@@ -587,13 +721,25 @@ def home():
 
 if __name__ == "__main__":
 
-    print("==============================================")
-    print("   SCALAR MATH DIFFICULTY MODEL API")
-    print("==============================================")
+    print(
+        "=============================================="
+    )
 
-    print(f"Starting server on port {PORT}")
+    print(
+        "   SCALAR MATH AI API"
+    )
 
-    print("==============================================")
+    print(
+        "=============================================="
+    )
+
+    print(
+        f"Starting server on port {PORT}"
+    )
+
+    print(
+        "=============================================="
+    )
 
     app.run(
         host=HOST,
