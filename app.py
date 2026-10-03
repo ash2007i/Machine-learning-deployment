@@ -1,82 +1,254 @@
-from flask import Flask, request, jsonify, Flask
+```python
+from flask import Flask, request, jsonify
 import joblib
 import threading
 import time
-import requests
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+MODEL_PATH = "/content/math_difficulty_model.joblib"
+PACKAGED_MODEL_PATH = "/content/scalar_math_difficulty_model.joblib"
+TRAINING_LOG_PATH = "/content/training_logs.txt"
+
+HOST = "0.0.0.0"
+PORT = 5004
+
+
+# ============================================================
+# CREATE FLASK APP
+# ============================================================
 
 app = Flask(__name__)
-# 1. Load the original joblib file
-base_pipeline = joblib.load('/content/math_difficulty_model.joblib')
 
-# 2. Package it with metadata (scalar parameter metrics)
-scalar_model_package = {
-    'model': base_pipeline,
-    'version': 1.0,
-    'accuracy_scalar': 0.60,
-    'num_features_scalar': 1000
-}
 
-# Save the scalar-packaged joblib
-joblib.dump(scalar_model_package, '/content/scalar_math_difficulty_model.joblib')
+# ============================================================
+# LOAD ORIGINAL MODEL
+# ============================================================
 
-# 3. Create Flask API on port 5004
-app_5004 = Flask("ScalarModelAPI")
+try:
+    base_pipeline = joblib.load(MODEL_PATH)
+    print("Original math difficulty model loaded successfully.")
 
-@app_5004.route('/api/predict', methods=['POST'])
+except Exception as e:
+    print(f"ERROR: Could not load model: {e}")
+    base_pipeline = None
+
+
+# ============================================================
+# PACKAGE MODEL WITH METADATA
+# ============================================================
+
+if base_pipeline is not None:
+
+    scalar_model_package = {
+        "model": base_pipeline,
+        "version": 1.0,
+        "accuracy_scalar": 0.60,
+        "num_features_scalar": 1000
+    }
+
+    try:
+        joblib.dump(
+            scalar_model_package,
+            PACKAGED_MODEL_PATH
+        )
+
+        print(
+            "Packaged model saved successfully at:"
+            f" {PACKAGED_MODEL_PATH}"
+        )
+
+    except Exception as e:
+        print(f"ERROR: Could not save packaged model: {e}")
+
+
+# ============================================================
+# PREDICTION API
+# ============================================================
+
+@app.route("/api/predict", methods=["POST"])
 def predict():
-    try:
-        data = request.get_json(force=True)
-        query = data.get('query', '')
-        if not query:
-            return jsonify({'error': 'Please provide a valid math "query" in your request body.'}), 400
-        
-        # Load package dynamically and predict
-        pkg = joblib.load('/content/scalar_math_difficulty_model.joblib')
-        prediction = pkg['model'].predict([query])[0]
-        
-        return jsonify({
-            'query': query,
-            'predicted_difficulty': prediction.upper(),
-            'model_version': pkg['version'],
-            'model_accuracy': pkg['accuracy_scalar']
-        })
-    except Exception as e:
-        return jsonify({'error': f'Prediction failed: {str(e)}'}), 500
 
-@app_5004.route('/api/train', methods=['POST'])
+    try:
+
+        # Get JSON request
+        data = request.get_json(force=True)
+
+        # Get query
+        query = data.get("query", "")
+
+        # Validate query
+        if not query or not isinstance(query, str):
+
+            return jsonify({
+                "error": 'Please provide a valid math "query".'
+            }), 400
+
+        # Load packaged model
+        pkg = joblib.load(PACKAGED_MODEL_PATH)
+
+        # Extract model
+        model = pkg["model"]
+
+        # Make prediction
+        prediction = model.predict([query])[0]
+
+        # Convert prediction safely to string
+        prediction_text = str(prediction).upper()
+
+        # Return response
+        return jsonify({
+
+            "query": query,
+
+            "predicted_difficulty": prediction_text,
+
+            "model_version": pkg["version"],
+
+            "model_accuracy": pkg["accuracy_scalar"]
+
+        }), 200
+
+    except Exception as e:
+
+        return jsonify({
+
+            "error": f"Prediction failed: {str(e)}"
+
+        }), 500
+
+
+# ============================================================
+# TRAINING DATA API
+# ============================================================
+
+@app.route("/api/train", methods=["POST"])
 def train_append():
+
     """
-    Endpoint allowing users to submit new query-difficulty mappings to simulate live training
+    Register a new query-difficulty mapping.
+
+    IMPORTANT:
+    This endpoint does NOT actually retrain the ML model.
+
+    It only stores new training examples so that the model
+    can be retrained later.
     """
+
     try:
+
+        # Get JSON request
         data = request.get_json(force=True)
-        query = data.get('query', '')
-        difficulty = data.get('difficulty', '')
-        
+
+        # Extract values
+        query = data.get("query", "")
+        difficulty = data.get("difficulty", "")
+
+        # Validate input
         if not query or not difficulty:
-            return jsonify({'error': 'Please provide both "query" and "difficulty" to register training.'}), 400
-            
-        # Simulate online update log
-        with open('/content/training_logs.txt', 'a') as log_file:
-            log_file.write(f"{query}|||{difficulty}\n")
-            
+
+            return jsonify({
+
+                "error": (
+                    'Please provide both "query" and '
+                    '"difficulty" to register training.'
+                )
+
+            }), 400
+
+        # Append training data to log
+        with open(
+            TRAINING_LOG_PATH,
+            "a",
+            encoding="utf-8"
+        ) as log_file:
+
+            log_file.write(
+                f"{query}|||{difficulty}\n"
+            )
+
+        # Return success
         return jsonify({
-            'status': 'success',
-            'message': 'New pattern recorded. Ready for retraining iteration.'
-        })
+
+            "status": "success",
+
+            "message": (
+                "New pattern recorded. "
+                "Ready for retraining iteration."
+            )
+
+        }), 200
+
     except Exception as e:
-        return jsonify({'error': f'Registration failed: {str(e)}'}), 500
 
-def run_api_5004():
-    app_5004.run(host='0.0.0.0', port=5004, debug=False, use_reloader=False)
+        return jsonify({
 
-# Launch background server thread
-flask_thread_5004 = threading.Thread(target=run_api_5004)
-flask_thread_5004.daemon = True
-flask_thread_5004.start()
+            "error": f"Registration failed: {str(e)}"
 
-time.sleep(1.5)
-print("Scalar Model API successfully running on http://127.0.0.1:5004")
+        }), 500
+
+
+# ============================================================
+# HEALTH CHECK API
+# ============================================================
+
+@app.route("/api/health", methods=["GET"])
+def health():
+
+    return jsonify({
+
+        "status": "online",
+
+        "service": "Scalar Math Difficulty Model API",
+
+        "port": PORT,
+
+        "model_loaded": base_pipeline is not None
+
+    }), 200
+
+
+# ============================================================
+# FLASK SERVER FUNCTION
+# ============================================================
+
+def run_api():
+
+    app.run(
+
+        host=HOST,
+
+        port=PORT,
+
+        debug=False,
+
+        use_reloader=False
+
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
 
 if __name__ == "__main__":
-    app.run(debug=True)
+
+    print("")
+    print("==============================================")
+    print("   SCALAR MATH DIFFICULTY MODEL API")
+    print("==============================================")
+    print(f"Server: http://127.0.0.1:{PORT}")
+    print("")
+    print("Available endpoints:")
+    print(f"  POST http://127.0.0.1:{PORT}/api/predict")
+    print(f"  POST http://127.0.0.1:{PORT}/api/train")
+    print(f"  GET  http://127.0.0.1:{PORT}/api/health")
+    print("==============================================")
+    print("")
+
+    # Start Flask
+    run_api()
+```
