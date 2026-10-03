@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify Flask
+from flask import Flask, request, jsonify, Flask
 import joblib
 import threading
 import time
